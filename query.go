@@ -373,6 +373,10 @@ func (q *Query) Buffer(attributeName string) (interface{}, error) {
 
 	case TILEDB_INT32:
 		ret = C.tiledb_query_get_buffer(q.context.tiledbContext, q.tiledbQuery, cattributeName, &cbuffer, &cbufferSize)
+		if cbufferSize == nil {
+			ret = C.TILEDB_OK + 1
+			break
+		}
 		length := (*cbufferSize) / C.sizeof_int32_t
 		buffer = (*[1 << 30]int32)(cbuffer)[:length:length]
 
@@ -915,6 +919,88 @@ func (q *Query) HasResults() (bool, error) {
 		return false, fmt.Errorf("Error checking if query has results: %s", q.context.LastError())
 	}
 	return int(hasResults) == 1, nil
+}
+
+// ResultBufferElements returns the number of elements in the result buffers from a read query.
+// This is a map from the attribute name to an array of 2 values.
+//
+// The first is number of elements (offsets) for var size attributes, and the
+// second is number of elements in the data buffer. For fixed sized attributes
+// (and coordinates), the first is always 0.
+//
+// For variable sized attributes: the first value is the
+// number of cells read, i.e. the number of offsets read for the attribute.
+// The second value is the total number of elements in the data buffer. For
+// example, a read query on a variable-length `float` attribute that reads
+// three cells would return 3 for the first number in the pair. If the total
+// amount of `floats` read across the three cells was 10, then the second
+// number in the pair would be 10.
+//
+// For fixed-length attributes, the first value is always 0. The second value
+// is the total number of elements in the data buffer. For example, a read
+// query on a single `float` attribute that reads three cells would return 3
+// for the second value. A read query on a `float` attribute with cell_val_num
+// 2 that reads three cells would return 3 * 2 = 6 for the second value.
+//
+// If the query has not been submitted, an empty map is returned.
+func (q *Query) ResultBufferElements() (map[string][2]int, error) {
+	// Build map
+	ret := make(map[string][2]int, 0)
+	// Get schema
+	schema, err := q.array.Schema()
+	if err != nil {
+		return nil, fmt.Errorf("Error getting ResultBufferElements for array: %s", err)
+	}
+
+	attributes, err := schema.Attributes()
+	if err != nil {
+		return nil, fmt.Errorf("Error getting ResultBufferElements for array: %s", err)
+	}
+	// Loop through each attribute
+	for _, attribute := range attributes {
+
+		// Check if attribute is variable attribute or not
+		cellValNum, err := attribute.CellValNum()
+		if err != nil {
+			return nil, fmt.Errorf("Error getting ResultBufferElements for array: %s", err)
+		}
+
+		// Get attribute name
+		name, err := attribute.Name()
+		if err != nil {
+			return nil, fmt.Errorf("Error getting ResultBufferElements for array: %s", err)
+		}
+
+		if cellValNum == TILEDB_VAR_NUM {
+			bufferOffset, bufferVal, err := q.BufferVar(name)
+			if err != nil {
+				return nil, fmt.Errorf("Error getting ResultBufferElements for array: %s", err)
+			}
+			// Set sizes for attribute in return map
+			ret[name] = [2]int{
+				reflect.ValueOf(bufferOffset).Len(),
+				reflect.ValueOf(bufferVal).Len()}
+			if err != nil {
+				return nil, fmt.Errorf("Error getting ResultBufferElements for array: %s", err)
+			}
+		} else {
+			bufferVal, err := q.Buffer(name)
+			if err != nil {
+				continue
+				// return nil, fmt.Errorf("Error getting ResultBufferElements for array: %s", err)
+			}
+			ret[name] = [2]int{0, reflect.ValueOf(bufferVal).Len()}
+		}
+	}
+
+	// Handle coordinates
+	bufferVal, err := q.Buffer(TILEDB_COORDS)
+	if err != nil {
+		return nil, fmt.Errorf("Error getting MaxBufferElements for array: %s", err)
+	}
+	ret[TILEDB_COORDS] = [2]int{0, reflect.ValueOf(bufferVal).Len()}
+
+	return ret, nil
 }
 
 // SetCoordinates sets the coordinate buffer
